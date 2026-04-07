@@ -1,0 +1,49 @@
+sequenceDiagram
+    participant SW_A as Alice_PS端(CPU/C代码)
+    participant HW_A as Alice_PL端(FPGA加速器)
+    participant Comm as 板间通信链路(以太网/SPI/UART)
+    participant SW_B as Bob_PS端(CPU/C代码)
+    participant HW_B as Bob_PL端(FPGA加速器)
+
+    Note over SW_A, HW_A: 【第一阶段】 FPGA-Alice: 密钥生成 (KeyGen)
+    SW_A->>HW_A: 注入种子(Seed)，触发Keccak/SHAKE
+    HW_A-->>SW_A: 返回伪随机扩展矩阵 A, 向量 s1, s2
+    SW_A->>HW_A: 调度NTT运算 (t = A * s1 + s2)
+    HW_A-->>SW_A: 返回计算结果 t
+    SW_A->>SW_A: 封装公钥 pk=(rho, t1) 和 私钥 sk=(rho, K, tr, s1, s2, t0)
+
+    Note over SW_A, SW_B: 【第二阶段】 公钥分发
+    SW_A->>Comm: 发送公钥 (pk)
+    Comm->>SW_B: Bob接收并存储公钥 (pk)
+
+    Note over SW_A, HW_A: 【第三阶段】 FPGA-Alice: 签名生成 (Sign)
+    SW_A->>SW_A: 准备待签名消息 (Message)
+    SW_A->>HW_A: 发送Message和sk，请求Keccak(mu)
+    loop 拒绝采样 (Rejection Sampling)
+        SW_A->>HW_A: 生成掩码向量 y, 计算 w = A * y
+        HW_A-->>SW_A: 返回 w 的高位 w1
+        SW_A->>HW_A: 计算挑战 c = Hash(mu || w1)
+        SW_A->>HW_A: 计算候选签名 z = y + c * s1
+        HW_A-->>SW_A: 返回 z
+        SW_A->>SW_A: 检查 z 和 (w - c*s2) 的范数 (Norm Check)
+        Note right of SW_A: 如果超出边界，则丢弃并重试
+    end
+    SW_A->>SW_A: 组装最终签名 sig = (c, z, h)
+
+    Note over SW_A, SW_B: 【第四阶段】 数据传输
+    SW_A->>Comm: 发送 消息(Message) + 签名(sig)
+    Comm->>SW_B: Bob接收 Message 和 sig
+
+    Note over SW_B, HW_B: 【第五阶段】 FPGA-Bob: 签名验证 (Verify)
+    SW_B->>SW_B: 解析 pk 和 sig(c, z, h)，计算 mu = Hash(Message)
+    SW_B->>SW_B: 检查 z 的范数是否合规
+    SW_B->>HW_B: 调度NTT: 计算 w1' = HighBits(A * z - c * t)
+    HW_B-->>SW_B: 返回重构的 w1'
+    SW_B->>HW_B: 调用Keccak: 计算 c' = Hash(mu || w1')
+    HW_B-->>SW_B: 返回哈希值 c'
+    
+    alt c == c' 验证成功
+        SW_B->>SW_B: 状态: ACCEPT (亮绿灯/串口打印Success)
+    else 验证失败
+        SW_B->>SW_B: 状态: REJECT (亮红灯/串口打印Fail)
+    end
